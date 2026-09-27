@@ -1586,10 +1586,14 @@ module( "ajax", {
 		}
 	});
 
-	testIframeWithCallback( "#14379 - jQuery.ajax() on unload", "ajax/onunload.html", function( status ) {
-		expect( 1 );
-		strictEqual( status, "success", "Request completed" );
-	});
+	// Chrome 80+ disallows synchronous XHR during page dismissal, so the sync
+	// request fired from the unload handler always errors there.
+	if ( !/chrome\/(?:[89]\d|\d{3,})\./i.test( navigator.userAgent ) ) {
+		testIframeWithCallback( "#14379 - jQuery.ajax() on unload", "ajax/onunload.html", function( status ) {
+			expect( 1 );
+			strictEqual( status, "success", "Request completed" );
+		});
+	}
 
 //----------- jQuery.ajaxPrefilter()
 

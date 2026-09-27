@@ -1,0 +1,125 @@
+name: build
+
+# Build-and-pack only: reproduces the npm tarball (jquery-1.11.1.tgz).
+# Tests run on Travis (see .travis.yml).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and pack in node:0.10
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE":/app -w /app node:0.10 bash -ec '
+          node --version
+          npm --version
+
+          # npm time machine at the release date so devDependencies resolve to
+          # their 2014 versions (matters for byte-identical uglify output).
+          npm config set registry https://:2014-05-01T18%3A05%3A32.863Z@time-machines-npm.sealsecurity.io/
+          # The container runs as root; keep lifecycle scripts running as root
+          # so they can write to the bind-mounted workspace.
+          npm config set unsafe-perm true
+          npm install
+
+          # Wrapper gruntfile: pin the uglify banner year and the dist/jquery.js
+          # "Date:" header to the original release date.
+          cat > /app/ci-Gruntfile.js <<\EOF
+          module.exports = function( grunt ) {
+            var releaseDate = new Date( "2014-05-01T17:42:00Z" );
+            grunt.template.today = function( format ) { return grunt.template.date( releaseDate, format ); };
+            require( "./Gruntfile.js" )( grunt );
+            // build/tasks/build.js embeds new Date() as @DATE; rewrite it the same way
+            // (ISO string with seconds dropped) before uglify consumes dist/jquery.js.
+            grunt.registerTask( "ci-release-date", function() {
+              var file = "dist/jquery.js",
+                stamp = releaseDate.toISOString().replace( /:\d+\.\d+Z$/, "Z" ),
+                text = grunt.file.read( file ),
+                re = /^( \* Date: ).*$/m;
+              if ( !re.test( text ) ) {
+                grunt.fail.warn( "No Date header found in " + file );
+              }
+              grunt.file.write( file, text.replace( re, "$1" + stamp ) );
+              grunt.log.writeln( file + ": Date set to " + stamp );
+            } );
+          };
+          EOF
+
+          ./node_modules/.bin/grunt --gruntfile ci-Gruntfile.js --base . build:*:* ci-release-date uglify dist:*
+
+          # CDN copies, mirroring makeReleaseCopies() in build/release.js.
+          cat > /tmp/cdn.js <<\EOF
+          var fs = require( "fs" ),
+            version = JSON.parse( fs.readFileSync( "package.json", "utf8" ) ).version,
+            devFile = "dist/jquery.js",
+            minFile = "dist/jquery.min.js",
+            mapFile = "dist/jquery.min.map",
+            cdnFolder = "dist/cdn",
+            releaseFiles = {
+              "jquery-VER.js": devFile,
+              "jquery-VER.min.js": minFile,
+              "jquery-VER.min.map": mapFile,
+              "jquery.js": devFile,
+              "jquery.min.js": minFile,
+              "jquery.min.map": mapFile,
+              "jquery-latest.js": devFile,
+              "jquery-latest.min.js": minFile,
+              "jquery-latest.min.map": mapFile
+            };
+
+          if ( !fs.existsSync( cdnFolder ) ) {
+            fs.mkdirSync( cdnFolder );
+          }
+
+          Object.keys( releaseFiles ).forEach( function( key ) {
+            var text, expected,
+              builtFile = releaseFiles[ key ],
+              unpathedFile = key.replace( /VER/g, version ),
+              releaseFile = cdnFolder + "/" + unpathedFile;
+
+            if ( /\.map$/.test( releaseFile ) ) {
+              // "file":"jquery.min.js","sources":["jquery.js"] -> versioned/latest names
+              expected = "\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+                "\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) + "\"]";
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/, expected );
+              if ( text.indexOf( expected ) < 0 ) {
+                throw new Error( "file/sources rewrite failed for " + releaseFile );
+              }
+              fs.writeFileSync( releaseFile, text );
+            } else if ( /\.min\.js$/.test( releaseFile ) ) {
+              // Remove the source map comment, as release.js does.
+              text = fs.readFileSync( builtFile, "utf8" );
+              if ( !/\/\/# sourceMappingURL=\S+/.test( text ) ) {
+                throw new Error( "No sourceMappingURL comment in " + builtFile );
+              }
+              fs.writeFileSync( releaseFile, text.replace( /\/\/# sourceMappingURL=\S+/, "" ) );
+            } else {
+              fs.writeFileSync( releaseFile, fs.readFileSync( builtFile ) );
+            }
+            console.log( "Created " + releaseFile );
+          } );
+          EOF
+          node /tmp/cdn.js
+
+          ls -l dist dist/cdn
+
+          # Keep CI-only files out of the tarball (.npmignore already excludes
+          # /build, /test, .travis.yml, ...).
+          rm -f ci-Gruntfile.js && rm -rf .github
+          npm pack
+          ls -l jquery-*.tgz
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jquery-npm-tarball
+          path: jquery-*.tgz
+          if-no-files-found: error

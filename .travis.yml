@@ -1,3 +1,18 @@
 language: node_js
 node_js:
 - '0.10'
+addons:
+  # Headless Chrome drives the browser QUnit suite (test/index.html)
+  chrome: stable
+  apt:
+    packages:
+    - php-cli
+script:
+- npm test
+# test/data/core/dont_return.php sleeps 30s; the single-threaded built-in server
+# would block every other request meanwhile, so run several workers.
+- PHP_CLI_SERVER_WORKERS=4 php -S 127.0.0.1:8000 -t "$TRAVIS_BUILD_DIR" > /tmp/php-server.log 2>&1 &
+- sleep 3
+# Output goes through `| cat` (with pipefail): Node on the job's TTY switches it to
+# non-blocking mode and Travis then silently drops the rest of the log (summary included).
+- bash -c 'set -o pipefail; { source ~/.nvm/nvm.sh && nvm install 18 >/dev/null && mkdir -p /tmp/qunit-runner && cd /tmp/qunit-runner && PUPPETEER_SKIP_DOWNLOAD=true npm install --no-audit --no-fund --no-save puppeteer-core@21.11.0 && cd "$TRAVIS_BUILD_DIR" && CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome)" NODE_PATH=/tmp/qunit-runner/node_modules node test/run-headless-qunit.js http://127.0.0.1:8000/test/index.html; } 2>&1 | cat'
